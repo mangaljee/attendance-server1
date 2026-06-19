@@ -11,9 +11,9 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Payload size limit badhai gayi hai taaki Selfie (Base64) aaram se upload ho sake
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
+// 🔥 FIX: Server ka size limit 50MB kar diya taaki photo upload par hang na ho
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -57,7 +57,7 @@ app.post('/api/employees/add', async (req, res) => {
 });
 
 // ==========================================
-// 3. SMART PUNCH SYSTEM (Selfie + GPS)
+// 3. SMART PUNCH SYSTEM (Selfie + GPS + 4 Steps)
 // ==========================================
 app.post('/api/attendance/punch', async (req, res) => {
     const { emp_code, lat, lon, punch_type, photo } = req.body; 
@@ -66,24 +66,20 @@ app.post('/api/attendance/punch', async (req, res) => {
         const checkExisting = await pool.query('SELECT * FROM attendance WHERE emp_code = $1 AND attendance_date = CURRENT_DATE', [emp_code]);
 
         if (checkExisting.rows.length === 0) {
-            // STEP 1: Check-in with Photo
             await pool.query('INSERT INTO attendance (emp_code, punch_location_lat, punch_location_lon, photo) VALUES ($1, $2, $3, $4)', [emp_code, lat, lon, photo]);
             return res.json({ success: true, message: "Morning Check-In Done!" });
         } 
 
         const record = checkExisting.rows[0];
 
-        // STEP 2: Lunch Out
         if (punch_type === "LUNCH_OUT" && record.lunch_out_time === null) {
             await pool.query('UPDATE attendance SET lunch_out_time = CURRENT_TIMESTAMP WHERE id = $1', [record.id]);
             return res.json({ success: true, message: "Lunch Break Started!" });
         }
-        // STEP 3: Lunch In
         if (punch_type === "LUNCH_IN" && record.lunch_in_time === null && record.lunch_out_time !== null) {
             await pool.query('UPDATE attendance SET lunch_in_time = CURRENT_TIMESTAMP WHERE id = $1', [record.id]);
             return res.json({ success: true, message: "Welcome Back from Lunch!" });
         }
-        // STEP 4: Check Out
         if (punch_type === "CHECK_OUT" && record.check_out_time === null) {
             await pool.query('UPDATE attendance SET check_out_time = CURRENT_TIMESTAMP WHERE id = $1', [record.id]);
             return res.json({ success: true, message: "Evening Check-Out Done!" });
@@ -94,7 +90,7 @@ app.post('/api/attendance/punch', async (req, res) => {
 });
 
 // ==========================================
-// 4. ADMIN HISTORY & REPORT (Lat/Lon Included)
+// 4. ADMIN HISTORY & REPORT
 // ==========================================
 app.get('/api/attendance/history', async (req, res) => {
     const { date } = req.query; 
