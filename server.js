@@ -5,13 +5,7 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// 🔥 FIX: Server ka size limit 50MB kar diya taaki photo upload par hang na ho
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE'], allowedHeaders: ['Content-Type', 'Authorization'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -21,7 +15,7 @@ const pool = new Pool({
 });
 
 // ==========================================
-// 1. ADMIN AUTHENTICATION
+// 1. AUTHENTICATION (ADMIN & EMPLOYEE)
 // ==========================================
 app.post('/api/admin/login', async (req, res) => {
     const { pin } = req.body;
@@ -32,65 +26,69 @@ app.post('/api/admin/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/admin/change-pin', async (req, res) => {
-    const { oldPin, newPin } = req.body;
+app.post('/api/employees/login', async (req, res) => {
+    const { emp_code, pin } = req.body;
     try {
-        const check = await pool.query('SELECT * FROM admin_auth WHERE pin = $1', [oldPin]);
-        if (check.rows.length > 0) {
-            await pool.query('UPDATE admin_auth SET pin = $1 WHERE pin = $2', [newPin, oldPin]);
-            res.json({ success: true, message: "PIN Changed Successfully!" });
-        } else {
-            res.json({ success: false, message: "Old PIN is incorrect." });
-        }
+        const result = await pool.query('SELECT * FROM employees WHERE emp_code = $1 AND pin = $2', [emp_code, pin]);
+        if (result.rows.length > 0) res.json({ success: true, data: result.rows[0] });
+        else res.json({ success: false, message: "Invalid Employee Code or PIN" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==========================================
-// 2. EMPLOYEE MANAGEMENT
-// ==========================================
 app.post('/api/employees/add', async (req, res) => {
     const { emp_code, name, phone, pin } = req.body;
     try {
         await pool.query('INSERT INTO employees (emp_code, name, phone, pin) VALUES ($1, $2, $3, $4)', [emp_code, name, phone, pin]);
         res.json({ success: true, message: "Employee registered!" });
-    } catch (err) { res.status(500).json({ error: "Employee Code already exists." }); }
+    } catch (err) { res.status(500).json({ error: "Employee Code exists." }); }
 });
 
 // ==========================================
-// 3. SMART PUNCH SYSTEM (Selfie + GPS + 4 Steps)
+// 2. SMART PUNCH SYSTEM (SERVER TIME + REWARDS)
 // ==========================================
 app.post('/api/attendance/punch', async (req, res) => {
     const { emp_code, lat, lon, punch_type, photo } = req.body; 
     
     try {
+        // 🔥 SERVER TIME (No Phone Time Hack)
+        const serverTime = new Date();
+        const currentHour = serverTime.getHours() + 5; // IST adjustment (Approximate, configure properly if needed)
+        const currentMin = serverTime.getMinutes() + 30;
+
         const checkExisting = await pool.query('SELECT * FROM attendance WHERE emp_code = $1 AND attendance_date = CURRENT_DATE', [emp_code]);
 
         if (checkExisting.rows.length === 0) {
             await pool.query('INSERT INTO attendance (emp_code, punch_location_lat, punch_location_lon, photo) VALUES ($1, $2, $3, $4)', [emp_code, lat, lon, photo]);
-            return res.json({ success: true, message: "Morning Check-In Done!" });
+            
+            // 🔥 REWARD LOGIC: Subah 10:15 se pehle aaye toh +10 Points
+            if (currentHour < 10 || (currentHour === 10 && currentMin <= 15)) {
+                await pool.query('UPDATE employees SET points = points + 10, current_streak = current_streak + 1 WHERE emp_code = $1', [emp_code]);
+                return res.json({ success: true, message: "Morning Check-In! 🌟 Early Bird: +10 Points!" });
+            } else {
+                await pool.query('UPDATE employees SET current_streak = 0 WHERE emp_code = $1', [emp_code]);
+                return res.json({ success: true, message: "Morning Check-In! You were late today." });
+            }
         } 
 
         const record = checkExisting.rows[0];
-
         if (punch_type === "LUNCH_OUT" && record.lunch_out_time === null) {
             await pool.query('UPDATE attendance SET lunch_out_time = CURRENT_TIMESTAMP WHERE id = $1', [record.id]);
             return res.json({ success: true, message: "Lunch Break Started!" });
         }
         if (punch_type === "LUNCH_IN" && record.lunch_in_time === null && record.lunch_out_time !== null) {
             await pool.query('UPDATE attendance SET lunch_in_time = CURRENT_TIMESTAMP WHERE id = $1', [record.id]);
-            return res.json({ success: true, message: "Welcome Back from Lunch!" });
+            return res.json({ success: true, message: "Welcome Back!" });
         }
         if (punch_type === "CHECK_OUT" && record.check_out_time === null) {
             await pool.query('UPDATE attendance SET check_out_time = CURRENT_TIMESTAMP WHERE id = $1', [record.id]);
             return res.json({ success: true, message: "Evening Check-Out Done!" });
         }
-        
         res.json({ success: false, message: "Action already completed or invalid order." });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==========================================
-// 4. ADMIN HISTORY & REPORT
+// 3. ADMIN & EMPLOYEE HISTORY REPORTS
 // ==========================================
 app.get('/api/attendance/history', async (req, res) => {
     const { date } = req.query; 
@@ -101,6 +99,17 @@ app.get('/api/attendance/history', async (req, res) => {
             WHERE a.attendance_date = $1 ORDER BY a.check_in_time DESC
         `, [date]);
         res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/employee/my-history/:emp_code', async (req, res) => {
+    const { emp_code } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT attendance_date, check_in_time, lunch_out_time, lunch_in_time, check_out_time 
+            FROM attendance WHERE emp_code = $1 ORDER BY attendance_date DESC LIMIT 30
+        `, [emp_code]);
+        res.json({ success: true, data: result.rows });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
